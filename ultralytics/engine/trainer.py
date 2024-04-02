@@ -202,7 +202,7 @@ class BaseTrainer:
         os.environ['NCCL_BLOCKING_WAIT'] = '1'  # set to enforce timeout
         dist.init_process_group(
             'nccl' if dist.is_nccl_available() else 'gloo',
-            timeout=timedelta(seconds=10800),  # 3 hours
+            timeout=timedelta(seconds=900),  # 15 minutes
             rank=RANK,
             world_size=world_size)
 
