@@ -4,6 +4,8 @@ import inspect
 import sys
 from pathlib import Path
 from typing import Union
+import json
+import numpy as np
 
 from ultralytics.cfg import TASK2DATA, get_cfg, get_save_dir
 from ultralytics.hub.utils import HUB_WEB_ROOT
@@ -82,11 +84,17 @@ class Model(nn.Module):
             self.session = HUBTrainingSession(model)
             model = self.session.model_file
 
+        # Check if Triton Server model
+        elif self.is_triton_model(model):
+            self.model = model
+            self.task = task
+            return
+
         # Load or create new YOLO model
         suffix = Path(model).suffix
         if not suffix and Path(model).stem in GITHUB_ASSETS_STEMS:
             model, suffix = Path(model).with_suffix('.pt'), '.pt'  # add suffix, i.e. yolov8n -> yolov8n.pt
-        if suffix in ('.yaml', '.yml'):
+        if Path(model).suffix in ('.yaml', '.yml'):
             self._new(model, task)
         else:
             self._load(model, task)
@@ -94,6 +102,13 @@ class Model(nn.Module):
     def __call__(self, source=None, stream=False, **kwargs):
         """Calls the 'predict' function with given arguments to perform object detection."""
         return self.predict(source, stream, **kwargs)
+
+    @staticmethod
+    def is_triton_model(model):
+        """Is model a Triton Server URL string, i.e. <scheme>://<netloc>/<endpoint>/<task_name>"""
+        from urllib.parse import urlsplit
+        url = urlsplit(model)
+        return url.netloc and url.path and url.scheme in {'http', 'grpc'}
 
     @staticmethod
     def is_hub_model(model):
@@ -147,9 +162,7 @@ class Model(nn.Module):
         self.overrides['task'] = self.task
 
     def _check_is_pytorch_model(self):
-        """
-        Raises TypeError is model is not a PyTorch model
-        """
+        """Raises TypeError is model is not a PyTorch model."""
         pt_str = isinstance(self.model, (str, Path)) and Path(self.model).suffix == '.pt'
         pt_module = isinstance(self.model, nn.Module)
         if not (pt_module or pt_str):
@@ -161,9 +174,7 @@ class Model(nn.Module):
                 f"argument directly in your inference command, i.e. 'model.predict(source=..., device=0)'")
 
     def reset_weights(self):
-        """
-        Resets the model modules parameters to randomly initialized values, losing all training information.
-        """
+        """Resets the model modules parameters to randomly initialized values, losing all training information."""
         self._check_is_pytorch_model()
         for m in self.model.modules():
             if hasattr(m, 'reset_parameters'):
@@ -173,9 +184,7 @@ class Model(nn.Module):
         return self
 
     def load(self, weights='yolov8n.pt'):
-        """
-        Transfers parameters with matching names and shapes from 'weights' to model.
-        """
+        """Transfers parameters with matching names and shapes from 'weights' to model."""
         self._check_is_pytorch_model()
         if isinstance(weights, (str, Path)):
             weights, self.ckpt = attempt_load_one_weight(weights)
@@ -204,11 +213,11 @@ class Model(nn.Module):
 
         Args:
             source (str | int | PIL | np.ndarray): The source of the image to make predictions on.
-                          Accepts all source types accepted by the YOLO model.
+                Accepts all source types accepted by the YOLO model.
             stream (bool): Whether to stream the predictions or not. Defaults to False.
             predictor (BasePredictor): Customized predictor.
             **kwargs : Additional keyword arguments passed to the predictor.
-                       Check the 'configuration' section in the documentation for all available options.
+                Check the 'configuration' section in the documentation for all available options.
 
         Returns:
             (List[ultralytics.engine.results.Results]): The prediction results.
@@ -251,8 +260,7 @@ class Model(nn.Module):
         if not hasattr(self.predictor, 'trackers'):
             from ultralytics.trackers import register_tracker
             register_tracker(self, persist)
-        # ByteTrack-based method needs low confidence predictions as input
-        kwargs['conf'] = kwargs.get('conf') or 0.1
+        kwargs['conf'] = kwargs.get('conf') or 0.1  # ByteTrack-based method needs low confidence predictions as input
         kwargs['mode'] = 'track'
         return self.predict(source=source, stream=stream, **kwargs)
 
@@ -264,12 +272,17 @@ class Model(nn.Module):
             validator (BaseValidator): Customized validator.
             **kwargs : Any other args accepted by the validators. To see all args check 'configuration' section in docs
         """
+        label_mapping_file = kwargs.pop('label_mapping_file', None)
         custom = {'rect': True}  # method defaults
         args = {**self.overrides, **custom, **kwargs, 'mode': 'val'}  # highest priority args on the right
         args['imgsz'] = check_imgsz(args['imgsz'], max_dim=1)
 
         validator = (validator or self._smart_load('validator'))(args=args, _callbacks=self.callbacks)
+        if label_mapping_file is not None:
+            label_mapping = {int(k): int(v) for k, v in json.load(open(label_mapping_file)).items()}
+            setattr(validator, 'label_mapping', label_mapping)
         validator(model=self.model)
+        self.validator = validator
         self.metrics = validator.metrics
         return validator.metrics
 
@@ -323,6 +336,7 @@ class Model(nn.Module):
             kwargs = self.session.train_args
         check_pip_update_available()
 
+        class_weights_path = kwargs.pop("class_weights_path", None)
         overrides = yaml_load(check_yaml(kwargs['cfg'])) if kwargs.get('cfg') else self.overrides
         custom = {'data': TASK2DATA[self.task]}  # method defaults
         args = {**overrides, **custom, **kwargs, 'mode': 'train'}  # highest priority args on the right
@@ -333,6 +347,15 @@ class Model(nn.Module):
         if not args.get('resume'):  # manually set model only if not resuming
             self.trainer.model = self.trainer.get_model(weights=self.model if self.ckpt else None, cfg=self.model.yaml)
             self.model = self.trainer.model
+
+        if class_weights_path:
+            class_weights_data = json.load(open(class_weights_path))
+            class_weights_data = {int(k): v for k, v in class_weights_data.items()}
+            num_weights = len(class_weights_data)
+            assert num_weights == len(self.model.names) and set(class_weights_data.keys()) == set(range(num_weights))
+            class_weights = np.array([class_weights_data[i] for i in range(num_weights)]).astype(np.float32)
+            self.model.class_weights = class_weights
+
         self.trainer.hub_session = self.session  # attach optional HUB session
         self.trainer.train()
         # Update model and cfg after training

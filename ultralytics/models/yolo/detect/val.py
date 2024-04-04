@@ -84,15 +84,34 @@ class DetectionValidator(BaseValidator):
                                        self.args.iou,
                                        labels=self.lb,
                                        multi_label=True,
-                                       agnostic=self.args.single_cls,
+                                       agnostic=self.args.agnostic_nms,
                                        max_det=self.args.max_det)
 
     def update_metrics(self, preds, batch):
         """Metrics."""
+        if hasattr(self, 'label_mapping'):
+            labels_to_keep = set(self.label_mapping.keys())
+            labels_to_keep_tensor = torch.tensor(list(labels_to_keep)).to(preds[0].device)
+
+            max_key = max(self.label_mapping.keys())
+            mapping_tensor = torch.arange(max_key + 1).to(preds[0].device)  # +1 because tensors are 0-indexed
+            for k, v in self.label_mapping.items():
+                mapping_tensor[k] = v
+
         for si, pred in enumerate(preds):
             idx = batch['batch_idx'] == si
             cls = batch['cls'][idx]
             bbox = batch['bboxes'][idx]
+            img_path = batch['im_file'][si]
+
+            if hasattr(self, 'label_mapping'):
+                mask = (pred[:, 5].unsqueeze(1) == labels_to_keep_tensor).any(dim=1)
+                filtered_pred = pred[mask]
+                updated_classes = mapping_tensor[filtered_pred[:, 5].int()]
+                filtered_pred = filtered_pred.clone()
+                filtered_pred[:, 5] = updated_classes
+                pred = filtered_pred
+
             nl, npr = cls.shape[0], pred.shape[0]  # number of labels, predictions
             shape = batch['ori_shape'][si]
             correct_bboxes = torch.zeros(npr, self.niou, dtype=torch.bool, device=self.device)  # init
@@ -100,6 +119,23 @@ class DetectionValidator(BaseValidator):
 
             if npr == 0:
                 if nl:
+                    height, width = batch['img'].shape[2:]
+                    tbox = ops.xywh2xyxy(bbox) * torch.tensor(
+                        (width, height, width, height), device=self.device)  # target boxes
+                    ops.scale_boxes(batch['img'][si].shape[1:], tbox, shape,
+                                    ratio_pad=batch['ratio_pad'][si])  # native-space labels
+
+                    # gt_bboxes_data = {'matched_gt': {}, 'img_path': img_path, 'unmatched_gt': [
+                    #     (tbox[x, :].tolist(), cls[x].detach().cpu().numpy().item()) for x in range(nl)
+                    # ], 'pred_boxes': np.zeros((0, 6)), 'iou': np.zeros((0, 0))}
+                    # gt_bboxes_data['all_gt'] = gt_bboxes_data['unmatched_gt']
+                    gt_bboxes_data = {
+                        'all_gt': [(tbox[x, :].tolist(), cls[x].detach().cpu().numpy().item()) for x in range(nl)],
+                        'pred_boxes': [],
+                        'img_path': img_path,
+                    }
+                    self.gt_assoc_data.append(gt_bboxes_data)
+
                     self.stats.append((correct_bboxes, *torch.zeros((2, 0), device=self.device), cls.squeeze(-1)))
                     if self.args.plots:
                         self.confusion_matrix.process_batch(detections=None, labels=cls.squeeze(-1))
@@ -108,7 +144,10 @@ class DetectionValidator(BaseValidator):
             # Predictions
             if self.args.single_cls:
                 pred[:, 5] = 0
+            
+
             predn = pred.clone()
+
             ops.scale_boxes(batch['img'][si].shape[1:], predn[:, :4], shape,
                             ratio_pad=batch['ratio_pad'][si])  # native-space pred
 
@@ -121,6 +160,28 @@ class DetectionValidator(BaseValidator):
                                 ratio_pad=batch['ratio_pad'][si])  # native-space labels
                 labelsn = torch.cat((cls, tbox), 1)  # native-space labels
                 correct_bboxes = self._process_batch(predn, labelsn)
+                
+                iou = box_iou(labelsn[:, 1:], predn[:, :4])
+                matches = self.match_predictions_custom_iou(iou, iou_threshold=0.5)
+
+                if matches is not None:
+                    # gt_to_pred_mapping = {x: y for x, y in zip(matches[:, 0], matches[:, 1])}
+                    # unmatches_gt_idxs = [x for x in range(len(cls)) if x not in gt_to_pred_mapping]
+                    # gt_bboxes_data = {'matched_gt': {}, 'unmatched_gt': [], 'img_path': img_path, 'iou': iou.detach().cpu().numpy()}                    
+                    # for gt_idx, pred_idx in gt_to_pred_mapping.items():
+                    #     gt_bboxes_data['matched_gt'][pred_idx] = (tbox[gt_idx, :].tolist(), cls[gt_idx].detach().cpu().numpy().item())
+                    # gt_bboxes_data['unmatched_gt'] = [(tbox[x, :].tolist(), cls[x].detach().cpu().numpy().item()) for x in unmatches_gt_idxs]
+                    gt_bboxes_data = {}                    
+                    gt_bboxes_data['all_gt'] = [(tbox[x, :].tolist(), cls[x].detach().cpu().numpy().item()) for x in range(nl)]
+                    preds_numpy = predn.detach().cpu().numpy()
+                    # each tuple contains: bbox (4 coordinates), label, score
+                    gt_bboxes_data['pred_boxes'] = [(preds_numpy[x, :4].tolist(), preds_numpy[x, 5].item(), preds_numpy[x, 4].item()) for x in range(preds_numpy.shape[0])]
+                    gt_bboxes_data['img_path'] = img_path
+                else:
+                    gt_bboxes_data = None
+
+                self.gt_assoc_data.append(gt_bboxes_data)
+
                 # TODO: maybe remove these `self.` arguments as they already are member variable
                 if self.args.plots:
                     self.confusion_matrix.process_batch(predn, labelsn)
@@ -140,7 +201,7 @@ class DetectionValidator(BaseValidator):
 
     def get_stats(self):
         """Returns metrics statistics and results dictionary."""
-        stats = [torch.cat(x, 0).cpu().numpy() for x in zip(*self.stats)]  # to numpy
+        stats = [torch.cat(x, 0).detach().cpu().numpy() for x in zip(*self.stats)]  # to numpy
         if len(stats) and stats[0].any():
             self.metrics.process(*stats)
         self.nt_per_class = np.bincount(stats[-1].astype(int), minlength=self.nc)  # number of targets per class
@@ -192,7 +253,7 @@ class DetectionValidator(BaseValidator):
             batch (int, optional): Size of batches, this is for `rect`. Defaults to None.
         """
         gs = max(int(de_parallel(self.model).stride if self.model else 0), 32)
-        return build_yolo_dataset(self.args, img_path, batch, self.data, mode=mode, stride=gs)
+        return build_yolo_dataset(self.args, img_path, batch, self.data, mode=mode, stride=self.stride)
 
     def get_dataloader(self, dataset_path, batch_size):
         """Construct and return dataloader."""

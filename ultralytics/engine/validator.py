@@ -36,7 +36,7 @@ from ultralytics.utils.torch_utils import de_parallel, select_device, smart_infe
 
 class BaseValidator:
     """
-    BaseValidator
+    BaseValidator.
 
     A base class for creating validators.
 
@@ -77,7 +77,7 @@ class BaseValidator:
         self.args = get_cfg(overrides=args)
         self.dataloader = dataloader
         self.pbar = pbar
-        self.model = None
+        self.stride = None
         self.data = None
         self.device = None
         self.batch_i = None
@@ -90,19 +90,20 @@ class BaseValidator:
         self.iouv = None
         self.jdict = None
         self.speed = {'preprocess': 0.0, 'inference': 0.0, 'loss': 0.0, 'postprocess': 0.0}
+        self.gt_assoc_data = []
 
         self.save_dir = save_dir or get_save_dir(self.args)
         (self.save_dir / 'labels' if self.args.save_txt else self.save_dir).mkdir(parents=True, exist_ok=True)
         if self.args.conf is None:
             self.args.conf = 0.001  # default conf=0.001
+        self.args.imgsz = check_imgsz(self.args.imgsz, max_dim=1)
 
         self.plots = {}
         self.callbacks = _callbacks or callbacks.get_default_callbacks()
 
     @smart_inference_mode()
     def __call__(self, trainer=None, model=None):
-        """
-        Supports validation of a pre-trained model if passed or a model being trained if trainer is passed (trainer
+        """Supports validation of a pre-trained model if passed or a model being trained if trainer is passed (trainer
         gets priority).
         """
         self.training = trainer is not None
@@ -113,7 +114,7 @@ class BaseValidator:
             self.args.half = self.device.type != 'cpu'  # force FP16 val during training
             model = trainer.ema.ema or trainer.model
             model = model.half() if self.args.half else model.float()
-            # self.model = model
+            self.model = model
             self.loss = torch.zeros_like(trainer.loss_items, device=trainer.device)
             self.args.plots &= trainer.stopper.possible_stop or (trainer.epoch == trainer.epochs - 1)
             model.eval()
@@ -125,7 +126,7 @@ class BaseValidator:
                                 dnn=self.args.dnn,
                                 data=self.args.data,
                                 fp16=self.args.half)
-            # self.model = model
+            self.model = model
             self.device = model.device  # update device
             self.args.half = model.fp16  # update half
             stride, pt, jit, engine = model.stride, model.pt, model.jit, model.engine
@@ -147,11 +148,13 @@ class BaseValidator:
                 self.args.workers = 0  # faster CPU val as time dominated by inference, not dataloading
             if not pt:
                 self.args.rect = False
+            self.stride = model.stride  # used in get_dataloader() for padding
             self.dataloader = self.dataloader or self.get_dataloader(self.data.get(self.args.split), self.args.batch)
 
             model.eval()
             model.warmup(imgsz=(1 if pt else self.args.batch, 3, imgsz, imgsz))  # warmup
 
+        self.run_callbacks('on_val_start')
         dt = Profile(), Profile(), Profile(), Profile()
         bar = TQDM(self.dataloader, desc=self.get_desc(), total=len(self.dataloader))
         self.init_metrics(de_parallel(model))
@@ -182,6 +185,10 @@ class BaseValidator:
                 self.plot_predictions(batch, preds, batch_i)
 
             self.run_callbacks('on_val_batch_end')
+
+            # if batch_i >= 500:
+            #     break
+
         stats = self.get_stats()
         self.check_stats(stats)
         self.speed = dict(zip(self.speed.keys(), (x.t / len(self.dataloader.dataset) * 1E3 for x in dt)))
@@ -203,6 +210,19 @@ class BaseValidator:
             if self.args.plots or self.args.save_json:
                 LOGGER.info(f"Results saved to {colorstr('bold', self.save_dir)}")
             return stats
+        
+    def match_predictions_custom_iou(self, iou, iou_threshold=0.5):
+        iou = iou.cpu().numpy()
+
+        matches = np.nonzero(iou >= iou_threshold)  # IoU > threshold and classes match
+        matches = np.array(matches).T
+        if matches.shape[0]:
+            if matches.shape[0] > 1:
+                matches = matches[iou[matches[:, 0], matches[:, 1]].argsort()[::-1]]
+                matches = matches[np.unique(matches[:, 1], return_index=True)[1]]
+                matches = matches[np.unique(matches[:, 0], return_index=True)[1]]
+
+        return matches
 
     def match_predictions(self, pred_classes, true_classes, iou, use_scipy=False):
         """
@@ -259,7 +279,7 @@ class BaseValidator:
         raise NotImplementedError('get_dataloader function not implemented for this validator')
 
     def build_dataset(self, img_path):
-        """Build dataset"""
+        """Build dataset."""
         raise NotImplementedError('build_dataset function not implemented in validator')
 
     def preprocess(self, batch):
