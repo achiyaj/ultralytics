@@ -5,6 +5,7 @@ Model validation metrics
 import math
 import warnings
 from pathlib import Path
+import copy
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -489,10 +490,18 @@ def ap_per_class(tp,
         plot_mc_curve(px, r, save_dir / f'{prefix}R_curve.png', names, ylabel='Recall', on_plot=on_plot)
 
     i = smooth(f1.mean(0), 0.1).argmax()  # max F1 index
+    extra_data = {
+        "p_per_conf": copy.deepcopy(p),
+        "r_per_conf": copy.deepcopy(r),
+        "ap_per_conf": copy.deepcopy(ap),
+        "f1_per_conf": copy.deepcopy(f1),
+        "conf_vals": copy.deepcopy(px),
+        "best_conf": px[i]
+    } 
     p, r, f1 = p[:, i], r[:, i], f1[:, i]
     tp = (r * nt).round()  # true positives
     fp = (tp / (p + eps) - tp).round()  # false positives
-    return tp, fp, p, r, f1, ap, unique_classes.astype(int)
+    return tp, fp, p, r, f1, ap, unique_classes.astype(int), extra_data
 
 
 class Metric(SimpleClass):
@@ -677,6 +686,8 @@ class DetMetrics(SimpleClass):
                                save_dir=self.save_dir,
                                names=self.names,
                                on_plot=self.on_plot)[2:]
+        self.extra_data = results[-1]
+        results = results[:-1]
         self.box.nc = len(self.names)
         self.box.update(results)
 
