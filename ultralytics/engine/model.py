@@ -282,6 +282,7 @@ class Model(nn.Module):
             label_mapping = {int(k): int(v) for k, v in json.load(open(label_mapping_file)).items()}
             setattr(validator, 'label_mapping', label_mapping)
         validator(model=self.model)
+        # validator.finalize_metrics()
         self.validator = validator
         self.metrics = validator.metrics
         return validator.metrics
@@ -364,6 +365,7 @@ class Model(nn.Module):
             self.model, _ = attempt_load_one_weight(ckpt)
             self.overrides = self.model.args
             self.metrics = getattr(self.trainer.validator, 'metrics', None)  # TODO: no metrics returned by DDP
+        self.validator = self.trainer.validator        
         return self.metrics
 
     def tune(self, use_ray=False, iterations=10, *args, **kwargs):
