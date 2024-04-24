@@ -474,7 +474,6 @@ def ap_per_class(tp,
             f1 (np.ndarray): F1-score values at each confidence threshold.
             ap (np.ndarray): Average precision for each class at different IoU thresholds.
             unique_classes (np.ndarray): An array of unique classes that have data.
-
     """
 
     # Sort by objectness
