@@ -406,6 +406,40 @@ def compute_ap(recall, precision):
     return ap, mpre, mrec
 
 
+def calc_total_det_stats(tp,
+                         conf,
+                         pred_cls,
+                         target_cls,
+                         eps=1e-16):
+    # Sort by objectness
+    i = np.argsort(-conf)
+    tp, conf, pred_cls = tp[i], conf[i], pred_cls[i]
+
+    # Find unique classes
+    _, nt = np.unique(target_cls, return_counts=True)
+    px  = np.linspace(0, 1, 1000)
+    total_ap = np.zeros((tp.shape[1], ))
+
+    # calculate the P + R of all classes at once
+    total_fpc = (1 - tp).cumsum(0)
+    total_tpc = tp.cumsum(0)
+    total_n_l = np.sum(nt)
+
+    # Recall
+    total_recall = total_tpc / (total_n_l + eps)  # recall curve
+    total_recall_per_conf = np.interp(-px, -conf[i], total_recall[:, 0], left=0)  # negative x, xp because xp decreases
+
+    # Precision
+    total_precision = total_tpc / (total_tpc + total_fpc)  # precision curve
+    total_precision_per_conf = np.interp(-px, -conf[i], total_precision[:, 0], left=1)  # p at pr_score
+
+    # AP from recall-precision curve
+    for j in range(tp.shape[1]):
+        total_ap[j], *_ = compute_ap(total_recall[:, j], total_precision[:, j])
+
+    return total_recall_per_conf, total_precision_per_conf, total_ap
+
+
 def ap_per_class(tp,
                  conf,
                  pred_cls,
@@ -490,13 +524,19 @@ def ap_per_class(tp,
         plot_mc_curve(px, r, save_dir / f'{prefix}R_curve.png', names, ylabel='Recall', on_plot=on_plot)
 
     i = smooth(f1.mean(0), 0.1).argmax()  # max F1 index
+
+    total_recall_per_conf, total_precision_per_conf, total_ap = calc_total_det_stats(tp, conf, pred_cls, target_cls)
     extra_data = {
         "p_per_conf": copy.deepcopy(p),
         "r_per_conf": copy.deepcopy(r),
         "ap_per_conf": copy.deepcopy(ap),
         "f1_per_conf": copy.deepcopy(f1),
         "conf_vals": copy.deepcopy(px),
-        "best_conf": px[i]
+        "best_conf": px[i],
+        "total_recall_per_conf": total_recall_per_conf,
+        "total_precision_per_conf": total_precision_per_conf,
+        "total_f1_per_conf": 2 * total_precision_per_conf * total_recall_per_conf / (total_precision_per_conf + total_recall_per_conf + eps),
+        "total_ap": total_ap
     } 
     p, r, f1 = p[:, i], r[:, i], f1[:, i]
     tp = (r * nt).round()  # true positives
