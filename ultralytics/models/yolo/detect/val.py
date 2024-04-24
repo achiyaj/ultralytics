@@ -132,7 +132,7 @@ class DetectionValidator(BaseValidator):
                     }
                     self.gt_assoc_data.append(gt_bboxes_data)
 
-                    self.stats.append((correct_bboxes, *torch.zeros((2, 0), device=self.device), cls.squeeze(-1), *torch.zeros((0, 2), device=self.device)))
+                    self.stats.append((correct_bboxes, *torch.zeros((2, 0), device=self.device), cls.squeeze(-1), torch.zeros((0, 2), device=self.device)))  # (conf, pcls, tcls, pred_sizes)
                     if self.args.plots:
                         self.confusion_matrix.process_batch(detections=None, labels=cls.squeeze(-1))
                 continue
@@ -175,7 +175,7 @@ class DetectionValidator(BaseValidator):
                 # TODO: maybe remove these `self.` arguments as they already are member variable
                 if self.args.plots:
                     self.confusion_matrix.process_batch(predn, labelsn)
-            self.stats.append((correct_bboxes, pred[:, 4], pred[:, 5], cls.squeeze(-1), orig_res_preds_widths_heights_tensor))  # (conf, pcls, tcls, pred sizes)
+            self.stats.append((correct_bboxes, pred[:, 4], pred[:, 5], cls.squeeze(-1), orig_res_preds_widths_heights_tensor))  # (conf, pcls, tcls, pred_sizes)
 
             # Save
             if self.args.save_json:

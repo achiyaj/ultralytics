@@ -445,7 +445,7 @@ def calc_single_class_metrics(tp, n_l, px, confs, eps):
     fpc = (1 - tp).cumsum(0)
     tpc = tp.cumsum(0)
 
-    py, ap = [], []
+    ap = []
 
     # Recall
     recall_curve = tpc / (n_l + eps)  # recall curve
@@ -457,9 +457,11 @@ def calc_single_class_metrics(tp, n_l, px, confs, eps):
 
     # AP from recall-precision curve
     for j in range(tp.shape[1]):
-        ap[j], mpre, mrec = compute_ap(recall_curve[:, j], precision_curve[:, j])
+        curr_iou_ap, mpre, mrec = compute_ap(recall_curve[:, j], precision_curve[:, j])
+        ap.append(curr_iou_ap)
+
         if j == 0:
-            py.append(np.interp(px, mrec, mpre))  # precision at mAP@0.5
+            py = np.interp(px, mrec, mpre)  # precision at mAP@0.5
 
     return precision_per_conf, recall_per_conf, ap, py
 
@@ -524,8 +526,9 @@ def ap_per_class(tp,
         curr_class_confs = conf[i]
         curr_class_tp = tp[i]
 
-        precision_per_conf, recall_per_conf, ap, curr_class_py = calc_single_class_metrics(curr_class_tp, nt[ci], px, curr_class_confs)
+        precision_per_conf, recall_per_conf, curr_class_ap, curr_class_py = calc_single_class_metrics(curr_class_tp, nt[ci], px, curr_class_confs, eps)
         
+        ap[ci, :] = np.array(curr_class_ap)
         r[ci] = recall_per_conf
         p[ci] = precision_per_conf
         
