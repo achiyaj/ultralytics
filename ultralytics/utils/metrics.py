@@ -441,7 +441,6 @@ def calc_total_det_stats(tp,
 
 
 def calc_single_class_metrics(tp, n_l, px, confs, eps):
-    ap = np.zeros((tp.shape[1], ))
     fpc = (1 - tp).cumsum(0)
     tpc = tp.cumsum(0)
 
@@ -463,7 +462,7 @@ def calc_single_class_metrics(tp, n_l, px, confs, eps):
         if j == 0:
             py = np.interp(px, mrec, mpre)  # precision at mAP@0.5
 
-    return precision_per_conf, recall_per_conf, ap, py
+    return precision_per_conf, recall_per_conf, np.array(ap), py
 
 
 def ap_per_class(tp,
@@ -471,6 +470,7 @@ def ap_per_class(tp,
                  pred_cls,
                  target_cls,
                  pred_sizes,
+                 target_sizes,
                  plot=False,
                  on_plot=None,
                  save_dir=Path(),
@@ -503,6 +503,7 @@ def ap_per_class(tp,
             unique_classes (np.ndarray): An array of unique classes that have data.
     """
     pred_areas = pred_sizes[:, 0] * pred_sizes[:, 1]
+    target_areas = target_sizes[:, 0] * target_sizes[:, 1]
     
     # Sort by objectness
     i = np.argsort(-conf)
@@ -515,7 +516,13 @@ def ap_per_class(tp,
     # Create Precision-Recall curve and compute AP for each class
     px, py = np.linspace(0, 1, 1000), []  # for plotting
     ap, p, r = np.zeros((nc, tp.shape[1])), np.zeros((nc, 1000)), np.zeros((nc, 1000))
-    class_metrics_per_size = {'S': {}, 'M': {}, 'L': {}}
+    # class_metrics_per_size = {'S': {}, 'M': {}, 'L': {}, 'All': {}}
+    class_metrics_per_size = {k: {
+        'p_per_conf': np.zeros((nc, 1000)),
+        'r_per_conf': np.zeros((nc, 1000)),
+        'f1_per_conf': np.zeros((nc, 1000)),
+        'ap_per_conf': np.zeros((nc, tp.shape[1]))} for k in ['Small', 'Medium', 'Large']}
+
     for ci, c in enumerate(unique_classes):
         i = pred_cls == c
         n_l = nt[ci]  # number of labels
@@ -526,9 +533,9 @@ def ap_per_class(tp,
         curr_class_confs = conf[i]
         curr_class_tp = tp[i]
 
-        precision_per_conf, recall_per_conf, curr_class_ap, curr_class_py = calc_single_class_metrics(curr_class_tp, nt[ci], px, curr_class_confs, eps)
+        precision_per_conf, recall_per_conf, curr_class_ap, curr_class_py = calc_single_class_metrics(curr_class_tp, n_l, px, curr_class_confs, eps)
         
-        ap[ci, :] = np.array(curr_class_ap)
+        ap[ci, :] = curr_class_ap
         r[ci] = recall_per_conf
         p[ci] = precision_per_conf
         
@@ -536,10 +543,22 @@ def ap_per_class(tp,
             py.append(curr_class_py)  # precision at mAP@0.5
 
         # repeat for S, M, L sizes
-        for size_name, size_area_lims in {'S': [0, 1024], 'M': [1024, 9216], 'L': [9216, 1e15]}.items():
-            pass
+        for size_name, size_area_lims in {'Small': [0, 1024], 'Medium': [1024, 9216], 'Large': [9216, 1e15]}.items():            
+            curr_size_i = np.logical_and(pred_cls == c, np.logical_and(pred_areas >= size_area_lims[0], pred_areas < size_area_lims[1]))
+            n_l_curr_size = np.sum(np.logical_and(target_cls == c, np.logical_and(target_areas >= size_area_lims[0], target_areas < size_area_lims[1])))   # number of labels
+            n_p = curr_size_i.sum()  # number of predictions
+            if n_p == 0 or n_l == 0:
+                continue
 
-        a = 1
+            curr_class_confs = conf[curr_size_i]
+            curr_class_tp = tp[curr_size_i]
+
+            curr_size_precision_per_conf, curr_size_recall_per_conf, curr_size_class_ap, _ = calc_single_class_metrics(curr_class_tp, n_l_curr_size, px, curr_class_confs, eps)
+            class_metrics_per_size[size_name]['p_per_conf'][ci] = curr_size_precision_per_conf
+            class_metrics_per_size[size_name]['r_per_conf'][ci] = curr_size_recall_per_conf
+            class_metrics_per_size[size_name]['f1_per_conf'][ci] = \
+                (2 * curr_size_precision_per_conf * curr_size_recall_per_conf) / (curr_size_precision_per_conf + curr_size_recall_per_conf + eps)
+            class_metrics_per_size[size_name]['ap_per_conf'][ci, :] = curr_size_class_ap
 
     # Compute F1 (harmonic mean of precision and recall)
     f1 = 2 * p * r / (p + r + eps)
@@ -554,18 +573,35 @@ def ap_per_class(tp,
     i = smooth(f1.mean(0), 0.1).argmax()  # max F1 index
 
     total_recall_per_conf, total_precision_per_conf, total_ap = calc_total_det_stats(tp, conf, pred_cls, target_cls)
+
+    for size_name, size_area_lims in {'Small': [0, 1024], 'Medium': [1024, 9216], 'Large': [9216, 1e15]}.items():
+        curr_size_i = np.logical_and(pred_areas >= size_area_lims[0], pred_areas < size_area_lims[1])
+        curr_size_confs = conf[curr_size_i]
+        curr_size_tp = tp[curr_size_i]
+        curr_size_preds = pred_cls[curr_size_i]
+        curr_size_targets = target_cls[np.logical_and(target_areas >= size_area_lims[0], target_areas < size_area_lims[1])]
+
+        curr_size_total_recall_per_conf, curr_size_total_precision_per_conf, curr_size_total_ap = calc_total_det_stats(
+            curr_size_tp, curr_size_confs, curr_size_preds, curr_size_targets)
+        
+        class_metrics_per_size[size_name]['total_recall_per_conf'] = curr_size_total_recall_per_conf
+        class_metrics_per_size[size_name]['total_precision_per_conf'] = curr_size_total_precision_per_conf
+        class_metrics_per_size[size_name]['total_ap'] = curr_size_total_ap
+        class_metrics_per_size[size_name]['total_f1_per_conf'] = 2 * curr_size_total_precision_per_conf * curr_size_total_recall_per_conf / (curr_size_total_precision_per_conf + curr_size_total_recall_per_conf + eps)
+
     extra_data = {
-        "p_per_conf": copy.deepcopy(p),
-        "r_per_conf": copy.deepcopy(r),
-        "ap_per_conf": copy.deepcopy(ap),
-        "f1_per_conf": copy.deepcopy(f1),
+        "p_per_conf": copy.deepcopy(p),  # this is the original ultralytics precision, unweighted averaged across all classes 
+        "r_per_conf": copy.deepcopy(r),  # this is the original ultralytics recall, unweighted averaged across all classes
+        "ap_per_conf": copy.deepcopy(ap),  # this is the original ultralytics AP, unweighted averaged across all classes
+        "f1_per_conf": copy.deepcopy(f1),  # this is the original ultralytics F1 score, unweighted averaged across all classes
         "conf_vals": copy.deepcopy(px),
         "best_conf": px[i],
-        "total_recall_per_conf": total_recall_per_conf,
-        "total_precision_per_conf": total_precision_per_conf,
-        "total_f1_per_conf": 2 * total_precision_per_conf * total_recall_per_conf / (total_precision_per_conf + total_recall_per_conf + eps),
-        "total_ap": total_ap
-    } 
+        "total_recall_per_conf": total_recall_per_conf,  # this is the actual detector recall, calculated once across all predictions
+        "total_precision_per_conf": total_precision_per_conf,   # this is the actual detector precision, calculated once across all predictions
+        "total_f1_per_conf": 2 * total_precision_per_conf * total_recall_per_conf / (total_precision_per_conf + total_recall_per_conf + eps),   # this is the actual detector F1, calculated once across all predictions
+        "total_ap": total_ap,  # this is the actual detector AP, calculated once across all predictions
+        "class_metrics_per_size": class_metrics_per_size,
+    }
     p, r, f1 = p[:, i], r[:, i], f1[:, i]
     tp = (r * nt).round()  # true positives
     fp = (tp / (p + eps) - tp).round()  # false positives
@@ -744,13 +780,14 @@ class DetMetrics(SimpleClass):
         self.box = Metric()
         self.speed = {'preprocess': 0.0, 'inference': 0.0, 'loss': 0.0, 'postprocess': 0.0}
 
-    def process(self, tp, conf, pred_cls, target_cls, pred_sizes):
+    def process(self, tp, conf, pred_cls, target_cls, pred_sizes, target_sizes):
         """Process predicted results for object detection and update metrics."""
         results = ap_per_class(tp,
                                conf,
                                pred_cls,
                                target_cls,
                                pred_sizes,
+                               target_sizes,
                                plot=self.plot,
                                save_dir=self.save_dir,
                                names=self.names,

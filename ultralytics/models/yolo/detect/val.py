@@ -117,6 +117,14 @@ class DetectionValidator(BaseValidator):
             correct_bboxes = torch.zeros(npr, self.niou, dtype=torch.bool, device=self.device)  # init
             self.seen += 1
 
+            if nl:
+                height, width = batch['img'].shape[2:]
+                tbox = ops.xywh2xyxy(bbox) * torch.tensor(
+                    (width, height, width, height), device=self.device)  # target boxes
+                ops.scale_boxes(batch['img'][si].shape[1:], tbox, shape,
+                                ratio_pad=batch['ratio_pad'][si])  # native-space labels
+                orig_res_gt_widths_heights_tensor = torch.stack(((tbox[:, 2] - tbox[:, 0]), (tbox[:, 3] - tbox[:, 1])), dim=1)
+
             if npr == 0:
                 if nl:
                     height, width = batch['img'].shape[2:]
@@ -132,7 +140,7 @@ class DetectionValidator(BaseValidator):
                     }
                     self.gt_assoc_data.append(gt_bboxes_data)
 
-                    self.stats.append((correct_bboxes, *torch.zeros((2, 0), device=self.device), cls.squeeze(-1), torch.zeros((0, 2), device=self.device)))  # (conf, pcls, tcls, pred_sizes)
+                    self.stats.append((correct_bboxes, *torch.zeros((2, 0), device=self.device), cls.squeeze(-1), torch.zeros((0, 2), device=self.device), orig_res_gt_widths_heights_tensor))  # (conf, pcls, tcls, pred sizes, target sizes)
                     if self.args.plots:
                         self.confusion_matrix.process_batch(detections=None, labels=cls.squeeze(-1))
                 continue
@@ -151,11 +159,6 @@ class DetectionValidator(BaseValidator):
 
             # Evaluate
             if nl:
-                height, width = batch['img'].shape[2:]
-                tbox = ops.xywh2xyxy(bbox) * torch.tensor(
-                    (width, height, width, height), device=self.device)  # target boxes
-                ops.scale_boxes(batch['img'][si].shape[1:], tbox, shape,
-                                ratio_pad=batch['ratio_pad'][si])  # native-space labels
                 labelsn = torch.cat((cls, tbox), 1)  # native-space labels
                 correct_bboxes = self._process_batch(predn, labelsn)
                 
@@ -175,7 +178,7 @@ class DetectionValidator(BaseValidator):
                 # TODO: maybe remove these `self.` arguments as they already are member variable
                 if self.args.plots:
                     self.confusion_matrix.process_batch(predn, labelsn)
-            self.stats.append((correct_bboxes, pred[:, 4], pred[:, 5], cls.squeeze(-1), orig_res_preds_widths_heights_tensor))  # (conf, pcls, tcls, pred_sizes)
+            self.stats.append((correct_bboxes, pred[:, 4], pred[:, 5], cls.squeeze(-1), orig_res_preds_widths_heights_tensor, orig_res_gt_widths_heights_tensor))  # (conf, pcls, tcls, pred_sizes, target_sizes)
 
             # Save
             if self.args.save_json:
@@ -194,7 +197,7 @@ class DetectionValidator(BaseValidator):
         stats = [torch.cat(x, 0).detach().cpu().numpy() for x in zip(*self.stats)]  # to numpy
         if len(stats) and stats[0].any():
             self.metrics.process(*stats)
-        self.nt_per_class = np.bincount(stats[-1].astype(int), minlength=self.nc)  # number of targets per class
+        self.nt_per_class = np.bincount(stats[3].astype(int), minlength=self.nc)  # number of targets per class
         return self.metrics.results_dict
 
     def print_results(self):
