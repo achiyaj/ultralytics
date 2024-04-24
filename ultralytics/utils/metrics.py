@@ -932,7 +932,7 @@ class PoseMetrics(SegmentMetrics):
                                     on_plot=self.on_plot,
                                     save_dir=self.save_dir,
                                     names=self.names,
-                                    prefix='Pose')[2:]
+                                    prefix='Pose')[2:] 
         self.pose.nc = len(self.names)
         self.pose.update(results_pose)
         results_box = ap_per_class(tp_b,
