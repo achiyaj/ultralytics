@@ -440,10 +440,35 @@ def calc_total_det_stats(tp,
     return total_recall_per_conf, total_precision_per_conf, total_ap
 
 
+def calc_single_class_metrics(tp, n_l, px, confs, eps):
+    ap = np.zeros((tp.shape[1], ))
+    fpc = (1 - tp).cumsum(0)
+    tpc = tp.cumsum(0)
+
+    py, ap = [], []
+
+    # Recall
+    recall_curve = tpc / (n_l + eps)  # recall curve
+    recall_per_conf = np.interp(-px, -confs, recall_curve[:, 0], left=0)  # negative x, xp because xp decreases
+
+    # Precision
+    precision_curve = tpc / (tpc + fpc)  # precision curve
+    precision_per_conf = np.interp(-px, -confs, precision_curve[:, 0], left=1)  # p at pr_score
+
+    # AP from recall-precision curve
+    for j in range(tp.shape[1]):
+        ap[j], mpre, mrec = compute_ap(recall_curve[:, j], precision_curve[:, j])
+        if j == 0:
+            py.append(np.interp(px, mrec, mpre))  # precision at mAP@0.5
+
+    return precision_per_conf, recall_per_conf, ap, py
+
+
 def ap_per_class(tp,
                  conf,
                  pred_cls,
                  target_cls,
+                 pred_sizes,
                  plot=False,
                  on_plot=None,
                  save_dir=Path(),
@@ -475,10 +500,11 @@ def ap_per_class(tp,
             ap (np.ndarray): Average precision for each class at different IoU thresholds.
             unique_classes (np.ndarray): An array of unique classes that have data.
     """
-
+    pred_areas = pred_sizes[:, 0] * pred_sizes[:, 1]
+    
     # Sort by objectness
     i = np.argsort(-conf)
-    tp, conf, pred_cls = tp[i], conf[i], pred_cls[i]
+    tp, conf, pred_cls, pred_areas = tp[i], conf[i], pred_cls[i], pred_areas[i]
 
     # Find unique classes
     unique_classes, nt = np.unique(target_cls, return_counts=True)
@@ -487,6 +513,7 @@ def ap_per_class(tp,
     # Create Precision-Recall curve and compute AP for each class
     px, py = np.linspace(0, 1, 1000), []  # for plotting
     ap, p, r = np.zeros((nc, tp.shape[1])), np.zeros((nc, 1000)), np.zeros((nc, 1000))
+    class_metrics_per_size = {'S': {}, 'M': {}, 'L': {}}
     for ci, c in enumerate(unique_classes):
         i = pred_cls == c
         n_l = nt[ci]  # number of labels
@@ -494,23 +521,22 @@ def ap_per_class(tp,
         if n_p == 0 or n_l == 0:
             continue
 
-        # Accumulate FPs and TPs
-        fpc = (1 - tp[i]).cumsum(0)
-        tpc = tp[i].cumsum(0)
+        curr_class_confs = conf[i]
+        curr_class_tp = tp[i]
 
-        # Recall
-        recall = tpc / (n_l + eps)  # recall curve
-        r[ci] = np.interp(-px, -conf[i], recall[:, 0], left=0)  # negative x, xp because xp decreases
+        precision_per_conf, recall_per_conf, ap, curr_class_py = calc_single_class_metrics(curr_class_tp, nt[ci], px, curr_class_confs)
+        
+        r[ci] = recall_per_conf
+        p[ci] = precision_per_conf
+        
+        if plot:
+            py.append(curr_class_py)  # precision at mAP@0.5
 
-        # Precision
-        precision = tpc / (tpc + fpc)  # precision curve
-        p[ci] = np.interp(-px, -conf[i], precision[:, 0], left=1)  # p at pr_score
+        # repeat for S, M, L sizes
+        for size_name, size_area_lims in {'S': [0, 1024], 'M': [1024, 9216], 'L': [9216, 1e15]}.items():
+            pass
 
-        # AP from recall-precision curve
-        for j in range(tp.shape[1]):
-            ap[ci, j], mpre, mrec = compute_ap(recall[:, j], precision[:, j])
-            if plot and j == 0:
-                py.append(np.interp(px, mrec, mpre))  # precision at mAP@0.5
+        a = 1
 
     # Compute F1 (harmonic mean of precision and recall)
     f1 = 2 * p * r / (p + r + eps)
@@ -715,12 +741,13 @@ class DetMetrics(SimpleClass):
         self.box = Metric()
         self.speed = {'preprocess': 0.0, 'inference': 0.0, 'loss': 0.0, 'postprocess': 0.0}
 
-    def process(self, tp, conf, pred_cls, target_cls):
+    def process(self, tp, conf, pred_cls, target_cls, pred_sizes):
         """Process predicted results for object detection and update metrics."""
         results = ap_per_class(tp,
                                conf,
                                pred_cls,
                                target_cls,
+                               pred_sizes,
                                plot=self.plot,
                                save_dir=self.save_dir,
                                names=self.names,

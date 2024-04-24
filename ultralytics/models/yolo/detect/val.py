@@ -125,10 +125,6 @@ class DetectionValidator(BaseValidator):
                     ops.scale_boxes(batch['img'][si].shape[1:], tbox, shape,
                                     ratio_pad=batch['ratio_pad'][si])  # native-space labels
 
-                    # gt_bboxes_data = {'matched_gt': {}, 'img_path': img_path, 'unmatched_gt': [
-                    #     (tbox[x, :].tolist(), cls[x].detach().cpu().numpy().item()) for x in range(nl)
-                    # ], 'pred_boxes': np.zeros((0, 6)), 'iou': np.zeros((0, 0))}
-                    # gt_bboxes_data['all_gt'] = gt_bboxes_data['unmatched_gt']
                     gt_bboxes_data = {
                         'all_gt': [(tbox[x, :].tolist(), cls[x].detach().cpu().numpy().item()) for x in range(nl)],
                         'pred_boxes': [],
@@ -136,7 +132,7 @@ class DetectionValidator(BaseValidator):
                     }
                     self.gt_assoc_data.append(gt_bboxes_data)
 
-                    self.stats.append((correct_bboxes, *torch.zeros((2, 0), device=self.device), cls.squeeze(-1)))
+                    self.stats.append((correct_bboxes, *torch.zeros((2, 0), device=self.device), cls.squeeze(-1), *torch.zeros((0, 2), device=self.device)))
                     if self.args.plots:
                         self.confusion_matrix.process_batch(detections=None, labels=cls.squeeze(-1))
                 continue
@@ -144,12 +140,14 @@ class DetectionValidator(BaseValidator):
             # Predictions
             if self.args.single_cls:
                 pred[:, 5] = 0
-            
 
+            # widths, heights = (pred[:, 2] - pred[:, 0]).detach().cpu().numpy(), (pred[:, 3] - pred[:, 1]).detach().cpu().numpy()
             predn = pred.clone()
 
             ops.scale_boxes(batch['img'][si].shape[1:], predn[:, :4], shape,
                             ratio_pad=batch['ratio_pad'][si])  # native-space pred
+            
+            orig_res_preds_widths_heights_tensor = torch.stack(((predn[:, 2] - predn[:, 0]), (predn[:, 3] - predn[:, 1])), dim=1)
 
             # Evaluate
             if nl:
@@ -163,29 +161,21 @@ class DetectionValidator(BaseValidator):
                 
                 iou = box_iou(labelsn[:, 1:], predn[:, :4])
                 matches = self.match_predictions_custom_iou(iou, iou_threshold=0.5)
+                preds_numpy = predn.detach().cpu().numpy()
 
-                if matches is not None:
-                    # gt_to_pred_mapping = {x: y for x, y in zip(matches[:, 0], matches[:, 1])}
-                    # unmatches_gt_idxs = [x for x in range(len(cls)) if x not in gt_to_pred_mapping]
-                    # gt_bboxes_data = {'matched_gt': {}, 'unmatched_gt': [], 'img_path': img_path, 'iou': iou.detach().cpu().numpy()}                    
-                    # for gt_idx, pred_idx in gt_to_pred_mapping.items():
-                    #     gt_bboxes_data['matched_gt'][pred_idx] = (tbox[gt_idx, :].tolist(), cls[gt_idx].detach().cpu().numpy().item())
-                    # gt_bboxes_data['unmatched_gt'] = [(tbox[x, :].tolist(), cls[x].detach().cpu().numpy().item()) for x in unmatches_gt_idxs]
-                    gt_bboxes_data = {}                    
-                    gt_bboxes_data['all_gt'] = [(tbox[x, :].tolist(), cls[x].detach().cpu().numpy().item()) for x in range(nl)]
-                    preds_numpy = predn.detach().cpu().numpy()
-                    # each tuple contains: bbox (4 coordinates), label, score
-                    gt_bboxes_data['pred_boxes'] = [(preds_numpy[x, :4].tolist(), preds_numpy[x, 5].item(), preds_numpy[x, 4].item()) for x in range(preds_numpy.shape[0])]
-                    gt_bboxes_data['img_path'] = img_path
-                else:
-                    gt_bboxes_data = None
+                # each tuple contains: bbox (4 coordinates), label, score
+                gt_bboxes_data = {
+                    'all_gt': [(tbox[x, :].tolist(), cls[x].detach().cpu().numpy().item()) for x in range(nl)],
+                    'pred_boxes': [(preds_numpy[x, :4].tolist(), preds_numpy[x, 5].item(), preds_numpy[x, 4].item()) for x in range(preds_numpy.shape[0])],
+                    'img_path': img_path,
+                }  
 
                 self.gt_assoc_data.append(gt_bboxes_data)
 
                 # TODO: maybe remove these `self.` arguments as they already are member variable
                 if self.args.plots:
                     self.confusion_matrix.process_batch(predn, labelsn)
-            self.stats.append((correct_bboxes, pred[:, 4], pred[:, 5], cls.squeeze(-1)))  # (conf, pcls, tcls)
+            self.stats.append((correct_bboxes, pred[:, 4], pred[:, 5], cls.squeeze(-1), orig_res_preds_widths_heights_tensor))  # (conf, pcls, tcls, pred sizes)
 
             # Save
             if self.args.save_json:
