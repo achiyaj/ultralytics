@@ -226,19 +226,32 @@ class ConfusionMatrix:
         detection_classes = detections[:, 5].int()
         iou = box_iou(labels[:, 1:], detections[:, :4])
 
-        x = torch.where(iou > self.iou_thres)
-        if x[0].shape[0]:
-            matches = torch.cat((torch.stack(x, 1), iou[x[0], x[1]][:, None]), 1).cpu().numpy()
-            if x[0].shape[0] > 1:
-                matches = matches[matches[:, 2].argsort()[::-1]]
+        # first, zero out the non-same class boxes
+        correct_class = gt_classes[:, None] == detection_classes
+        iou = iou * correct_class  # zero out the wrong classes
+        iou = iou.cpu().numpy()
+
+        matches = np.nonzero(iou >= self.iou_thres)  # IoU > threshold and classes match
+        matches = np.array(matches).T
+        if matches.shape[0]:
+            if matches.shape[0] > 1:
+                matches = matches[iou[matches[:, 0], matches[:, 1]].argsort()[::-1]]
                 matches = matches[np.unique(matches[:, 1], return_index=True)[1]]
-                matches = matches[matches[:, 2].argsort()[::-1]]
                 matches = matches[np.unique(matches[:, 0], return_index=True)[1]]
-        else:
-            matches = np.zeros((0, 3))
+
+        # x = torch.where(iou > self.iou_thres)
+        # if x[0].shape[0]:
+        #     matches = torch.cat((torch.stack(x, 1), iou[x[0], x[1]][:, None]), 1).cpu().numpy()
+        #     if x[0].shape[0] > 1:
+        #         matches = matches[matches[:, 2].argsort()[::-1]]
+        #         matches = matches[np.unique(matches[:, 1], return_index=True)[1]]
+        #         matches = matches[matches[:, 2].argsort()[::-1]]
+        #         matches = matches[np.unique(matches[:, 0], return_index=True)[1]]
+        # else:
+        #     matches = np.zeros((0, 3))
 
         n = matches.shape[0] > 0
-        m0, m1, _ = matches.transpose().astype(int)
+        m0, m1 = matches.transpose().astype(int)  # m0 is GT IDs, m1 is detections IDs
         for i, gc in enumerate(gt_classes):
             j = m0 == i
             if n and sum(j) == 1:
@@ -250,6 +263,69 @@ class ConfusionMatrix:
             for i, dc in enumerate(detection_classes):
                 if not any(m1 == i):
                     self.matrix[dc, self.nc] += 1  # predicted background
+
+        # take care of matches with different labels
+        iou = box_iou(labels[:, 1:], detections[:, :4])
+        iou = iou.cpu().numpy()
+
+        iou[m0, :] = 0
+        iou[:, m1] = 0
+
+        matches = np.nonzero(iou >= self.iou_thres)  # IoU > threshold and classes match
+        matches = np.array(matches).T
+        if matches.shape[0]:
+            if matches.shape[0] > 1:
+                matches = matches[iou[matches[:, 0], matches[:, 1]].argsort()[::-1]]
+                matches = matches[np.unique(matches[:, 1], return_index=True)[1]]
+                matches = matches[np.unique(matches[:, 0], return_index=True)[1]]
+
+        n = matches.shape[0] > 0
+        m0, m1 = matches.transpose().astype(int)  # m0 is GT IDs, m1 is detections IDs
+        for i, gc in enumerate(gt_classes):
+            j = m0 == i
+            if n and sum(j) == 1:
+                self.matrix[detection_classes[m1[j]], gc] += 1  # correct
+            else:
+                self.matrix[self.nc, gc] += 1  # true background
+
+        if n:
+            for i, dc in enumerate(detection_classes):
+                if not any(m1 == i):
+                    self.matrix[dc, self.nc] += 1  # predicted background
+
+
+        
+
+
+
+
+
+
+        # x = torch.where(iou > self.iou_thres)
+        # if x[0].shape[0]:
+        #     matches = torch.cat((torch.stack(x, 1), iou[x[0], x[1]][:, None]), 1).cpu().numpy()
+        #     if x[0].shape[0] > 1:
+        #         matches = matches[matches[:, 2].argsort()[::-1]]
+        #         matches = matches[np.unique(matches[:, 1], return_index=True)[1]]
+        #         matches = matches[matches[:, 2].argsort()[::-1]]
+        #         matches = matches[np.unique(matches[:, 0], return_index=True)[1]]
+        # else:
+        #     matches = np.zeros((0, 3))
+
+        # n = matches.shape[0] > 0
+        # m0, m1, _ = matches.transpose().astype(int)
+        # for i, gc in enumerate(gt_classes):
+        #     j = m0 == i
+        #     if n and sum(j) == 1:
+        #         self.matrix[detection_classes[m1[j]], gc] += 1  # correct
+        #     else:
+        #         self.matrix[self.nc, gc] += 1  # true background
+
+        # if n:
+        #     for i, dc in enumerate(detection_classes):
+        #         if not any(m1 == i):
+        #             self.matrix[dc, self.nc] += 1  # predicted background
+
 
     def matrix(self):
         """Returns the confusion matrix."""
