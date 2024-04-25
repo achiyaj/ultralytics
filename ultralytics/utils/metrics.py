@@ -215,46 +215,48 @@ class ConfusionMatrix:
             labels (Array[M, 5]): Ground truth bounding boxes and their associated class labels.
                                   Each row should contain (class, x1, y1, x2, y2).
         """
-        detections = detections.detach().cpu()  # .numpy()
-        labels = labels.detach().cpu()  # .numpy()
+        if detections is None:
+            gt_classes = labels.int()
+            for gc in gt_classes:
+                self.matrix[self.nc, gc] += 1  # background FN
+            return
 
         detections = detections[detections[:, 4] > self.conf]
         gt_classes = labels[:, 0].int()
         detection_classes = detections[:, 5].int()
+        iou = box_iou(labels[:, 1:], detections[:, :4])
 
-        # Step 1: Consider only (GT box, detected box) pairs with the same class label
+        # first, zero out the non-same class boxes
         correct_class = gt_classes[:, None] == detection_classes
-        iou = (box_iou(labels[:, 1:], detections[:, :4]) * correct_class).float().detach().cpu().numpy()
+        iou = iou * correct_class  # zero out the wrong classes
+        iou = iou.cpu().numpy()
 
-        x = torch.where(iou > self.iou_thres)
-        if x[0].shape[0]:
-            matches = torch.cat((torch.stack(x, 1), iou[x[0], x[1]][:, None]), 1).cpu().numpy()
-            if x[0].shape[0] > 1:
-                matches = matches[matches[:, 2].argsort()[::-1]]
+        matches = np.nonzero(iou >= self.iou_thres)  # IoU > threshold and classes match
+        matches = np.array(matches).T
+        if matches.shape[0]:
+            if matches.shape[0] > 1:
+                matches = matches[iou[matches[:, 0], matches[:, 1]].argsort()[::-1]]
                 matches = matches[np.unique(matches[:, 1], return_index=True)[1]]
-                matches = matches[matches[:, 2].argsort()[::-1]]
                 matches = matches[np.unique(matches[:, 0], return_index=True)[1]]
-        else:
-            matches = np.zeros((0, 3))
 
+        same_class_matches = copy.deepcopy(matches)
         n = matches.shape[0] > 0
-        m0, m1, _ = matches.transpose().astype(int)
-        for i, gc in enumerate(gt_classes):
-            j = m0 == i
-            if n and sum(j) == 1:
-                self.matrix[detection_classes[m1[j]], gc] += 1  # correct
+        m0, m1 = matches.transpose().astype(int)  # m0 is GT IDs, m1 is detections IDs
 
-        # Step 2: Gather non-associated GT and detected boxes, and apply the original algorithm
-        unmatched_gt = np.ones(gt_classes.shape, dtype=bool)
-        unmatched_gt[m0] = False
+        for match_idx, matched_gt_box_idx in enumerate(m0):
+            gt_class = gt_classes[matched_gt_box_idx]
+            pred_class = detection_classes[m1[match_idx]]
+            assert gt_class == pred_class
+            self.matrix[gt_class, gt_class] += 1  # correct
 
-        unmatched_detections = np.ones(detection_classes.shape, dtype=bool)
-        unmatched_detections[m1] = False
+        # take care of matches with different labels
+        iou = box_iou(labels[:, 1:], detections[:, :4])
+        iou = iou.cpu().numpy()
 
-        # Calculate IoU for unmatched boxes
-        unmatched_iou = box_iou(labels[unmatched_gt, 1:], detections[unmatched_detections, :4])
+        iou[m0, :] = 0
+        iou[:, m1] = 0
 
-        matches = np.nonzero(unmatched_iou >= self.iou_thres)  # IoU > threshold and classes match
+        matches = np.nonzero(iou >= self.iou_thres)  # IoU > threshold and classes match
         matches = np.array(matches).T
         if matches.shape[0]:
             if matches.shape[0] > 1:
@@ -263,22 +265,29 @@ class ConfusionMatrix:
                 matches = matches[np.unique(matches[:, 0], return_index=True)[1]]
 
         n = matches.shape[0] > 0
-        # m0, m1, _ = matches.transpose().astype(int)
-        # m0, m1 = matches.transpose().astype(int)
-        m0, m1 = matches.astype(int)
+        m0, m1 = matches.transpose().astype(int)  # m0 is GT IDs, m1 is detections IDs
 
-        # Update the confusion matrix with the unmatched boxes
-        for i, gc in enumerate(gt_classes[unmatched_gt]):
-            j = m0 == i
-            if n and sum(j) == 1:
-                self.matrix[detection_classes[unmatched_detections][m1[j]], gc] += 1  # correct
+        diff_class_gt_classes = gt_classes[m0]
+        diff_class_pred_classes = detection_classes[m1]
+
+        for gt_class, pred_class in zip(diff_class_gt_classes, diff_class_pred_classes):
+            if gt_class == pred_class:
+                self.matrix[pred_class, self.nc] += 1
+                self.matrix[self.nc, gt_class] += 1
+                continue
             else:
-                self.matrix[self.nc, gc] += 1  # true background
+                self.matrix[pred_class, gt_class] += 1
 
-        if n:
-            for i, dc in enumerate(detection_classes[unmatched_detections]):
-                if not any(m1 == i):
-                    self.matrix[dc, self.nc] += 1  # predicted background
+        matched_gt_boxes = set(np.concatenate([same_class_matches[:, 0].T, m0]).tolist())
+        matched_pred_boxes = set(np.concatenate([same_class_matches[:, 1].T, m1]).tolist())
+
+        for pred_idx, pred_label in enumerate(detection_classes):
+            if pred_idx not in matched_pred_boxes:
+                self.matrix[pred_label, self.nc] += 1
+
+        for gt_idx, gt_label in enumerate(gt_classes):
+            if gt_idx not in matched_gt_boxes:
+                self.matrix[self.nc, gt_label] += 1
 
     def matrix(self):
         """Returns the confusion matrix."""
