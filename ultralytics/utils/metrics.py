@@ -215,16 +215,16 @@ class ConfusionMatrix:
             labels (Array[M, 5]): Ground truth bounding boxes and their associated class labels.
                                   Each row should contain (class, x1, y1, x2, y2).
         """
-        if detections is None:
-            gt_classes = labels.int()
-            for gc in gt_classes:
-                self.matrix[self.nc, gc] += 1  # background FN
-            return
+        detections = detections.detach().cpu()  # .numpy()
+        labels = labels.detach().cpu()  # .numpy()
 
         detections = detections[detections[:, 4] > self.conf]
         gt_classes = labels[:, 0].int()
         detection_classes = detections[:, 5].int()
-        iou = box_iou(labels[:, 1:], detections[:, :4])
+
+        # Step 1: Consider only (GT box, detected box) pairs with the same class label
+        correct_class = gt_classes[:, None] == detection_classes
+        iou = (box_iou(labels[:, 1:], detections[:, :4]) * correct_class).float().detach().cpu().numpy()
 
         # first, zero out the non-same class boxes
         correct_class = gt_classes[:, None] == detection_classes
@@ -285,11 +285,40 @@ class ConfusionMatrix:
             j = m0 == i
             if n and sum(j) == 1:
                 self.matrix[detection_classes[m1[j]], gc] += 1  # correct
+
+        # Step 2: Gather non-associated GT and detected boxes, and apply the original algorithm
+        unmatched_gt = np.ones(gt_classes.shape, dtype=bool)
+        unmatched_gt[m0] = False
+
+        unmatched_detections = np.ones(detection_classes.shape, dtype=bool)
+        unmatched_detections[m1] = False
+
+        # Calculate IoU for unmatched boxes
+        unmatched_iou = box_iou(labels[unmatched_gt, 1:], detections[unmatched_detections, :4])
+
+        matches = np.nonzero(unmatched_iou >= self.iou_thres)  # IoU > threshold and classes match
+        matches = np.array(matches).T
+        if matches.shape[0]:
+            if matches.shape[0] > 1:
+                matches = matches[iou[matches[:, 0], matches[:, 1]].argsort()[::-1]]
+                matches = matches[np.unique(matches[:, 1], return_index=True)[1]]
+                matches = matches[np.unique(matches[:, 0], return_index=True)[1]]
+
+        n = matches.shape[0] > 0
+        # m0, m1, _ = matches.transpose().astype(int)
+        # m0, m1 = matches.transpose().astype(int)
+        m0, m1 = matches.astype(int)
+
+        # Update the confusion matrix with the unmatched boxes
+        for i, gc in enumerate(gt_classes[unmatched_gt]):
+            j = m0 == i
+            if n and sum(j) == 1:
+                self.matrix[detection_classes[unmatched_detections][m1[j]], gc] += 1  # correct
             else:
                 self.matrix[self.nc, gc] += 1  # true background
 
         if n:
-            for i, dc in enumerate(detection_classes):
+            for i, dc in enumerate(detection_classes[unmatched_detections]):
                 if not any(m1 == i):
                     self.matrix[dc, self.nc] += 1  # predicted background
 
@@ -597,7 +626,9 @@ def ap_per_class(tp,
         'p_per_conf': np.zeros((nc, 1000)),
         'r_per_conf': np.zeros((nc, 1000)),
         'f1_per_conf': np.zeros((nc, 1000)),
-        'ap_per_conf': np.zeros((nc, tp.shape[1]))} for k in ['Small', 'Medium', 'Large']}
+        'ap_per_conf': np.zeros((nc, tp.shape[1])),
+        'num_preds': np.zeros((nc, )),
+        'num_gt': np.zeros((nc, ))} for k in ['Small', 'Medium', 'Large']}
 
     for ci, c in enumerate(unique_classes):
         i = pred_cls == c
@@ -619,11 +650,15 @@ def ap_per_class(tp,
             py.append(curr_class_py)  # precision at mAP@0.5
 
         # repeat for S, M, L sizes
-        for size_name, size_area_lims in {'Small': [0, 1024], 'Medium': [1024, 9216], 'Large': [9216, 1e15]}.items():            
+        for size_name, size_area_lims in {'Small': [0, 1024], 'Medium': [1024, 9216], 'Large': [9216, 1e15]}.items():
+            
             curr_size_i = np.logical_and(pred_cls == c, np.logical_and(pred_areas >= size_area_lims[0], pred_areas < size_area_lims[1]))
             n_l_curr_size = np.sum(np.logical_and(target_cls == c, np.logical_and(target_areas >= size_area_lims[0], target_areas < size_area_lims[1])))   # number of labels
-            n_p = curr_size_i.sum()  # number of predictions
-            if n_p == 0 or n_l == 0:
+            n_p_curr_size = curr_size_i.sum()  # number of predictions
+
+            class_metrics_per_size[size_name]['num_preds'][ci] = n_p_curr_size
+            class_metrics_per_size[size_name]['num_gt'][ci] = n_l_curr_size
+            if n_p_curr_size == 0 or n_l_curr_size == 0:
                 continue
 
             curr_class_confs = conf[curr_size_i]
