@@ -193,6 +193,7 @@ class BaseValidator:
         self.check_stats(stats)
         self.speed = dict(zip(self.speed.keys(), (x.t / len(self.dataloader.dataset) * 1E3 for x in dt)))
         self.finalize_metrics()
+        stats = self.update_extra_data_stats(stats)
         self.print_results()
         self.run_callbacks('on_val_end')
         if self.training:
@@ -343,3 +344,22 @@ class BaseValidator:
     def eval_json(self, stats):
         """Evaluate and return JSON format of prediction statistics."""
         pass
+
+    def update_extra_data_stats(self, stats):
+        stats['metrics/precision(B) (Ultralytics)'] = stats.pop('metrics/precision(B)')
+        stats['metrics/recall(B) (Ultralytics)'] = stats.pop('metrics/recall(B)')
+
+        if hasattr(self.metrics, "extra_data"):
+            extra_data = self.metrics.extra_data
+            metrics_conf_idx = np.argmin(np.abs(np.mean(extra_data['p_per_conf'], axis=0) - stats['metrics/precision(B) (Ultralytics)']))
+            stats['metrics/Total Precision'] = extra_data['total_precision_per_conf'][metrics_conf_idx]
+            stats['metrics/Total Recall'] = extra_data['total_recall_per_conf'][metrics_conf_idx]
+            stats['metrics/Total AP50'] = extra_data['total_ap'][0]
+            stats['metrics/Total mAP50-95'] = np.mean(extra_data['total_ap'])
+        else:
+            stats['metrics/Total Precision'] = 0.0
+            stats['metrics/Total Recall'] = 0.0
+            stats['metrics/Total AP50'] = 0.0
+            stats['metrics/Total mAP50-95'] = 0.0
+            
+        return stats

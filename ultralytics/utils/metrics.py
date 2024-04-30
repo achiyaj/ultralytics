@@ -620,13 +620,17 @@ def ap_per_class(tp,
 
     for size_name, size_area_lims in {'Small': [0, 1024], 'Medium': [1024, 9216], 'Large': [9216, 1e15]}.items():
         curr_size_i = np.logical_and(pred_areas >= size_area_lims[0], pred_areas < size_area_lims[1])
-        curr_size_confs = conf[curr_size_i]
-        curr_size_tp = tp[curr_size_i]
-        curr_size_preds = pred_cls[curr_size_i]
-        curr_size_targets = target_cls[np.logical_and(target_areas >= size_area_lims[0], target_areas < size_area_lims[1])]
+        if not np.any(curr_size_i):
+            curr_size_total_recall_per_conf, curr_size_total_precision_per_conf = np.zeros(px.shape), np.zeros(px.shape)
+            curr_size_total_ap = np.zeros((tp.shape[1], ))
+        else:
+            curr_size_confs = conf[curr_size_i]
+            curr_size_tp = tp[curr_size_i]
+            curr_size_preds = pred_cls[curr_size_i]
+            curr_size_targets = target_cls[np.logical_and(target_areas >= size_area_lims[0], target_areas < size_area_lims[1])]
 
-        curr_size_total_recall_per_conf, curr_size_total_precision_per_conf, curr_size_total_ap = calc_total_det_stats(
-            curr_size_tp, curr_size_confs, curr_size_preds, curr_size_targets)
+            curr_size_total_recall_per_conf, curr_size_total_precision_per_conf, curr_size_total_ap = calc_total_det_stats(
+                curr_size_tp, curr_size_confs, curr_size_preds, curr_size_targets)
         
         class_metrics_per_size[size_name]['total_recall_per_conf'] = curr_size_total_recall_per_conf
         class_metrics_per_size[size_name]['total_precision_per_conf'] = curr_size_total_precision_per_conf
