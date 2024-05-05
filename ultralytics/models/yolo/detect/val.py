@@ -162,8 +162,8 @@ class DetectionValidator(BaseValidator):
                 labelsn = torch.cat((cls, tbox), 1)  # native-space labels
                 correct_bboxes = self._process_batch(predn, labelsn)
                 
-                iou = box_iou(labelsn[:, 1:], predn[:, :4])
-                matches = self.match_predictions_custom_iou(iou, iou_threshold=0.5)
+                # iou = box_iou(labelsn[:, 1:], predn[:, :4])
+                # matches = self.match_predictions_custom_iou(iou, iou_threshold=0.5)
                 preds_numpy = predn.detach().cpu().numpy()
 
                 # each tuple contains: bbox (4 coordinates), label, score
@@ -178,6 +178,8 @@ class DetectionValidator(BaseValidator):
                 # TODO: maybe remove these `self.` arguments as they already are member variable
                 if self.args.plots:
                     self.confusion_matrix.process_batch(predn, labelsn)
+            else:
+                orig_res_gt_widths_heights_tensor = torch.zeros((0, 2), device=self.device)
             self.stats.append((correct_bboxes, pred[:, 4], pred[:, 5], cls.squeeze(-1), orig_res_preds_widths_heights_tensor, orig_res_gt_widths_heights_tensor))  # (conf, pcls, tcls, pred_sizes, target_sizes)
 
             # Save
