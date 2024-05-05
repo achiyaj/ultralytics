@@ -226,30 +226,68 @@ class ConfusionMatrix:
         detection_classes = detections[:, 5].int()
         iou = box_iou(labels[:, 1:], detections[:, :4])
 
-        x = torch.where(iou > self.iou_thres)
-        if x[0].shape[0]:
-            matches = torch.cat((torch.stack(x, 1), iou[x[0], x[1]][:, None]), 1).cpu().numpy()
-            if x[0].shape[0] > 1:
-                matches = matches[matches[:, 2].argsort()[::-1]]
+        # first, zero out the non-same class boxes
+        correct_class = gt_classes[:, None] == detection_classes
+        iou = iou * correct_class  # zero out the wrong classes
+        iou = iou.cpu().numpy()
+
+        matches = np.nonzero(iou >= self.iou_thres)  # IoU > threshold and classes match
+        matches = np.array(matches).T
+        if matches.shape[0]:
+            if matches.shape[0] > 1:
+                matches = matches[iou[matches[:, 0], matches[:, 1]].argsort()[::-1]]
                 matches = matches[np.unique(matches[:, 1], return_index=True)[1]]
-                matches = matches[matches[:, 2].argsort()[::-1]]
                 matches = matches[np.unique(matches[:, 0], return_index=True)[1]]
-        else:
-            matches = np.zeros((0, 3))
+
+        same_class_matches = copy.deepcopy(matches)
+        n = matches.shape[0] > 0
+        m0, m1 = matches.transpose().astype(int)  # m0 is GT IDs, m1 is detections IDs
+
+        for match_idx, matched_gt_box_idx in enumerate(m0):
+            gt_class = gt_classes[matched_gt_box_idx]
+            pred_class = detection_classes[m1[match_idx]]
+            assert gt_class == pred_class
+            self.matrix[gt_class, gt_class] += 1  # correct
+
+        # take care of matches with different labels
+        iou = box_iou(labels[:, 1:], detections[:, :4])
+        iou = iou.cpu().numpy()
+
+        iou[m0, :] = 0
+        iou[:, m1] = 0
+
+        matches = np.nonzero(iou >= self.iou_thres)  # IoU > threshold and classes match
+        matches = np.array(matches).T
+        if matches.shape[0]:
+            if matches.shape[0] > 1:
+                matches = matches[iou[matches[:, 0], matches[:, 1]].argsort()[::-1]]
+                matches = matches[np.unique(matches[:, 1], return_index=True)[1]]
+                matches = matches[np.unique(matches[:, 0], return_index=True)[1]]
 
         n = matches.shape[0] > 0
-        m0, m1, _ = matches.transpose().astype(int)
-        for i, gc in enumerate(gt_classes):
-            j = m0 == i
-            if n and sum(j) == 1:
-                self.matrix[detection_classes[m1[j]], gc] += 1  # correct
-            else:
-                self.matrix[self.nc, gc] += 1  # true background
+        m0, m1 = matches.transpose().astype(int)  # m0 is GT IDs, m1 is detections IDs
 
-        if n:
-            for i, dc in enumerate(detection_classes):
-                if not any(m1 == i):
-                    self.matrix[dc, self.nc] += 1  # predicted background
+        diff_class_gt_classes = gt_classes[m0]
+        diff_class_pred_classes = detection_classes[m1]
+
+        for gt_class, pred_class in zip(diff_class_gt_classes, diff_class_pred_classes):
+            if gt_class == pred_class:
+                self.matrix[pred_class, self.nc] += 1
+                self.matrix[self.nc, gt_class] += 1
+                continue
+            else:
+                self.matrix[pred_class, gt_class] += 1
+
+        matched_gt_boxes = set(np.concatenate([same_class_matches[:, 0].T, m0]).tolist())
+        matched_pred_boxes = set(np.concatenate([same_class_matches[:, 1].T, m1]).tolist())
+
+        for pred_idx, pred_label in enumerate(detection_classes):
+            if pred_idx not in matched_pred_boxes:
+                self.matrix[pred_label, self.nc] += 1
+
+        for gt_idx, gt_label in enumerate(gt_classes):
+            if gt_idx not in matched_gt_boxes:
+                self.matrix[self.nc, gt_label] += 1
 
     def matrix(self):
         """Returns the confusion matrix."""
@@ -440,10 +478,37 @@ def calc_total_det_stats(tp,
     return total_recall_per_conf, total_precision_per_conf, total_ap
 
 
+def calc_single_class_metrics(tp, n_l, px, confs, eps):
+    fpc = (1 - tp).cumsum(0)
+    tpc = tp.cumsum(0)
+
+    ap = []
+
+    # Recall
+    recall_curve = tpc / (n_l + eps)  # recall curve
+    recall_per_conf = np.interp(-px, -confs, recall_curve[:, 0], left=0)  # negative x, xp because xp decreases
+
+    # Precision
+    precision_curve = tpc / (tpc + fpc)  # precision curve
+    precision_per_conf = np.interp(-px, -confs, precision_curve[:, 0], left=1)  # p at pr_score
+
+    # AP from recall-precision curve
+    for j in range(tp.shape[1]):
+        curr_iou_ap, mpre, mrec = compute_ap(recall_curve[:, j], precision_curve[:, j])
+        ap.append(curr_iou_ap)
+
+        if j == 0:
+            py = np.interp(px, mrec, mpre)  # precision at mAP@0.5
+
+    return precision_per_conf, recall_per_conf, np.array(ap), py
+
+
 def ap_per_class(tp,
                  conf,
                  pred_cls,
                  target_cls,
+                 pred_sizes,
+                 target_sizes,
                  plot=False,
                  on_plot=None,
                  save_dir=Path(),
@@ -475,10 +540,12 @@ def ap_per_class(tp,
             ap (np.ndarray): Average precision for each class at different IoU thresholds.
             unique_classes (np.ndarray): An array of unique classes that have data.
     """
-
+    pred_areas = pred_sizes[:, 0] * pred_sizes[:, 1]
+    target_areas = target_sizes[:, 0] * target_sizes[:, 1]
+    
     # Sort by objectness
     i = np.argsort(-conf)
-    tp, conf, pred_cls = tp[i], conf[i], pred_cls[i]
+    tp, conf, pred_cls, pred_areas = tp[i], conf[i], pred_cls[i], pred_areas[i]
 
     # Find unique classes
     unique_classes, nt = np.unique(target_cls, return_counts=True)
@@ -487,6 +554,15 @@ def ap_per_class(tp,
     # Create Precision-Recall curve and compute AP for each class
     px, py = np.linspace(0, 1, 1000), []  # for plotting
     ap, p, r = np.zeros((nc, tp.shape[1])), np.zeros((nc, 1000)), np.zeros((nc, 1000))
+    # class_metrics_per_size = {'S': {}, 'M': {}, 'L': {}, 'All': {}}
+    class_metrics_per_size = {k: {
+        'p_per_conf': np.zeros((nc, 1000)),
+        'r_per_conf': np.zeros((nc, 1000)),
+        'f1_per_conf': np.zeros((nc, 1000)),
+        'ap_per_conf': np.zeros((nc, tp.shape[1])),
+        'num_preds': np.zeros((nc, )),
+        'num_gt': np.zeros((nc, ))} for k in ['Small', 'Medium', 'Large']}
+
     for ci, c in enumerate(unique_classes):
         i = pred_cls == c
         n_l = nt[ci]  # number of labels
@@ -494,23 +570,39 @@ def ap_per_class(tp,
         if n_p == 0 or n_l == 0:
             continue
 
-        # Accumulate FPs and TPs
-        fpc = (1 - tp[i]).cumsum(0)
-        tpc = tp[i].cumsum(0)
+        curr_class_confs = conf[i]
+        curr_class_tp = tp[i]
 
-        # Recall
-        recall = tpc / (n_l + eps)  # recall curve
-        r[ci] = np.interp(-px, -conf[i], recall[:, 0], left=0)  # negative x, xp because xp decreases
+        precision_per_conf, recall_per_conf, curr_class_ap, curr_class_py = calc_single_class_metrics(curr_class_tp, n_l, px, curr_class_confs, eps)
+        
+        ap[ci, :] = curr_class_ap
+        r[ci] = recall_per_conf
+        p[ci] = precision_per_conf
+        
+        if plot:
+            py.append(curr_class_py)  # precision at mAP@0.5
 
-        # Precision
-        precision = tpc / (tpc + fpc)  # precision curve
-        p[ci] = np.interp(-px, -conf[i], precision[:, 0], left=1)  # p at pr_score
+        # repeat for S, M, L sizes
+        for size_name, size_area_lims in {'Small': [0, 1024], 'Medium': [1024, 9216], 'Large': [9216, 1e15]}.items():
+            
+            curr_size_i = np.logical_and(pred_cls == c, np.logical_and(pred_areas >= size_area_lims[0], pred_areas < size_area_lims[1]))
+            n_l_curr_size = np.sum(np.logical_and(target_cls == c, np.logical_and(target_areas >= size_area_lims[0], target_areas < size_area_lims[1])))   # number of labels
+            n_p_curr_size = curr_size_i.sum()  # number of predictions
 
-        # AP from recall-precision curve
-        for j in range(tp.shape[1]):
-            ap[ci, j], mpre, mrec = compute_ap(recall[:, j], precision[:, j])
-            if plot and j == 0:
-                py.append(np.interp(px, mrec, mpre))  # precision at mAP@0.5
+            class_metrics_per_size[size_name]['num_preds'][ci] = n_p_curr_size
+            class_metrics_per_size[size_name]['num_gt'][ci] = n_l_curr_size
+            if n_p_curr_size == 0 or n_l_curr_size == 0:
+                continue
+
+            curr_class_confs = conf[curr_size_i]
+            curr_class_tp = tp[curr_size_i]
+
+            curr_size_precision_per_conf, curr_size_recall_per_conf, curr_size_class_ap, _ = calc_single_class_metrics(curr_class_tp, n_l_curr_size, px, curr_class_confs, eps)
+            class_metrics_per_size[size_name]['p_per_conf'][ci] = curr_size_precision_per_conf
+            class_metrics_per_size[size_name]['r_per_conf'][ci] = curr_size_recall_per_conf
+            class_metrics_per_size[size_name]['f1_per_conf'][ci] = \
+                (2 * curr_size_precision_per_conf * curr_size_recall_per_conf) / (curr_size_precision_per_conf + curr_size_recall_per_conf + eps)
+            class_metrics_per_size[size_name]['ap_per_conf'][ci, :] = curr_size_class_ap
 
     # Compute F1 (harmonic mean of precision and recall)
     f1 = 2 * p * r / (p + r + eps)
@@ -525,18 +617,39 @@ def ap_per_class(tp,
     i = smooth(f1.mean(0), 0.1).argmax()  # max F1 index
 
     total_recall_per_conf, total_precision_per_conf, total_ap = calc_total_det_stats(tp, conf, pred_cls, target_cls)
+
+    for size_name, size_area_lims in {'Small': [0, 1024], 'Medium': [1024, 9216], 'Large': [9216, 1e15]}.items():
+        curr_size_i = np.logical_and(pred_areas >= size_area_lims[0], pred_areas < size_area_lims[1])
+        if not np.any(curr_size_i):
+            curr_size_total_recall_per_conf, curr_size_total_precision_per_conf = np.zeros(px.shape), np.zeros(px.shape)
+            curr_size_total_ap = np.zeros((tp.shape[1], ))
+        else:
+            curr_size_confs = conf[curr_size_i]
+            curr_size_tp = tp[curr_size_i]
+            curr_size_preds = pred_cls[curr_size_i]
+            curr_size_targets = target_cls[np.logical_and(target_areas >= size_area_lims[0], target_areas < size_area_lims[1])]
+
+            curr_size_total_recall_per_conf, curr_size_total_precision_per_conf, curr_size_total_ap = calc_total_det_stats(
+                curr_size_tp, curr_size_confs, curr_size_preds, curr_size_targets)
+        
+        class_metrics_per_size[size_name]['total_recall_per_conf'] = curr_size_total_recall_per_conf
+        class_metrics_per_size[size_name]['total_precision_per_conf'] = curr_size_total_precision_per_conf
+        class_metrics_per_size[size_name]['total_ap'] = curr_size_total_ap
+        class_metrics_per_size[size_name]['total_f1_per_conf'] = 2 * curr_size_total_precision_per_conf * curr_size_total_recall_per_conf / (curr_size_total_precision_per_conf + curr_size_total_recall_per_conf + eps)
+
     extra_data = {
-        "p_per_conf": copy.deepcopy(p),
-        "r_per_conf": copy.deepcopy(r),
-        "ap_per_conf": copy.deepcopy(ap),
-        "f1_per_conf": copy.deepcopy(f1),
+        "p_per_conf": copy.deepcopy(p),  # this is the original ultralytics precision, unweighted averaged across all classes 
+        "r_per_conf": copy.deepcopy(r),  # this is the original ultralytics recall, unweighted averaged across all classes
+        "ap_per_conf": copy.deepcopy(ap),  # this is the original ultralytics AP, unweighted averaged across all classes
+        "f1_per_conf": copy.deepcopy(f1),  # this is the original ultralytics F1 score, unweighted averaged across all classes
         "conf_vals": copy.deepcopy(px),
         "best_conf": px[i],
-        "total_recall_per_conf": total_recall_per_conf,
-        "total_precision_per_conf": total_precision_per_conf,
-        "total_f1_per_conf": 2 * total_precision_per_conf * total_recall_per_conf / (total_precision_per_conf + total_recall_per_conf + eps),
-        "total_ap": total_ap
-    } 
+        "total_recall_per_conf": total_recall_per_conf,  # this is the actual detector recall, calculated once across all predictions
+        "total_precision_per_conf": total_precision_per_conf,   # this is the actual detector precision, calculated once across all predictions
+        "total_f1_per_conf": 2 * total_precision_per_conf * total_recall_per_conf / (total_precision_per_conf + total_recall_per_conf + eps),   # this is the actual detector F1, calculated once across all predictions
+        "total_ap": total_ap,  # this is the actual detector AP, calculated once across all predictions
+        "class_metrics_per_size": class_metrics_per_size,
+    }
     p, r, f1 = p[:, i], r[:, i], f1[:, i]
     tp = (r * nt).round()  # true positives
     fp = (tp / (p + eps) - tp).round()  # false positives
@@ -715,12 +828,14 @@ class DetMetrics(SimpleClass):
         self.box = Metric()
         self.speed = {'preprocess': 0.0, 'inference': 0.0, 'loss': 0.0, 'postprocess': 0.0}
 
-    def process(self, tp, conf, pred_cls, target_cls):
+    def process(self, tp, conf, pred_cls, target_cls, pred_sizes, target_sizes):
         """Process predicted results for object detection and update metrics."""
         results = ap_per_class(tp,
                                conf,
                                pred_cls,
                                target_cls,
+                               pred_sizes,
+                               target_sizes,
                                plot=self.plot,
                                save_dir=self.save_dir,
                                names=self.names,
