@@ -389,7 +389,7 @@ class BaseTrainer:
                 if self.args.val or final_epoch:
                     self.metrics, self.fitness = self.validate()
                 self.save_metrics(metrics={**self.label_loss_items(self.tloss), **self.metrics, **self.lr})
-                self.stop = self.stopper(epoch + 1, self.fitness)
+                self.stop = self.stopper(epoch + 1, self.metrics, self.fitness)
 
                 # Save model
                 if self.args.save or (epoch + 1 == self.epochs):

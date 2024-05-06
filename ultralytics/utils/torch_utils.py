@@ -518,19 +518,20 @@ class EarlyStopping:
     Early stopping class that stops training when a specified number of epochs have passed without improvement.
     """
 
-    def __init__(self, patience=50):
+    def __init__(self, patience=50, key_metric='Total mAP50-95'):
         """
         Initialize early stopping object
 
         Args:
             patience (int, optional): Number of epochs to wait after fitness stops improving before stopping.
         """
-        self.best_fitness = 0.0  # i.e. mAP
+        self.best_metric_value = 0.0  # i.e. mAP
         self.best_epoch = 0
         self.patience = patience or float('inf')  # epochs to wait after fitness stops improving to stop
         self.possible_stop = False  # possible stop may occur next epoch
+        self.key_metric = key_metric
 
-    def __call__(self, epoch, fitness):
+    def __call__(self, epoch, metrics, fitness):
         """
         Check whether to stop training
 
@@ -541,17 +542,25 @@ class EarlyStopping:
         Returns:
             (bool): True if training should stop, False otherwise
         """
-        if fitness is None:  # check if fitness=None (happens when val=False)
+        if self.key_metric == 'fitness':
+            value_to_compare = fitness            
+        elif f'metrics/{self.key_metric}' in metrics:
+            value_to_compare = metrics[f'metrics/{self.key_metric}']
+        else:
+            LOGGER.warning(f'Metric to compute early stopping was not found!!! Early stopping will not be triggered for this run')
             return False
+        
+        if value_to_compare is None:  # (happens when val=False)
+            return False 
 
-        if fitness >= self.best_fitness:  # >= 0 to allow for early zero-fitness stage of training
+        if value_to_compare >= self.best_metric_value:  # >= 0 to allow for early zero-fitness stage of training
             self.best_epoch = epoch
-            self.best_fitness = fitness
+            self.best_metric_value = value_to_compare
         delta = epoch - self.best_epoch  # epochs without improvement
         self.possible_stop = delta >= (self.patience - 1)  # possible stop may occur next epoch
         stop = delta >= self.patience  # stop training if patience exceeded
         if stop:
-            LOGGER.info(f'Stopping training early as no improvement observed in last {self.patience} epochs. '
+            LOGGER.info(f'Stopping training early as no improvement in metric {self.key_metric} observed in last {self.patience} epochs. '
                         f'Best results observed at epoch {self.best_epoch}, best model saved as best.pt.\n'
                         f'To update EarlyStopping(patience={self.patience}) pass a new patience value, '
                         f'i.e. `patience=300` or use `patience=0` to disable EarlyStopping.')
