@@ -280,7 +280,8 @@ class BaseTrainer:
             self.lf = one_cycle(1, self.args.lrf, self.epochs)  # cosine 1->hyp['lrf']
         else:
             self.lf = lambda x: (1 - x / self.epochs) * (1.0 - self.args.lrf) + self.args.lrf  # linear
-        self.scheduler = optim.lr_scheduler.LambdaLR(self.optimizer, lr_lambda=self.lf)
+        # self.scheduler = optim.lr_scheduler.LambdaLR(self.optimizer, lr_lambda=self.lf)
+        self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(self.optimizer, patience=(self.args.patience / 2))
         self.stopper, self.stop = EarlyStopping(patience=self.args.patience), False
         self.resume_training(ckpt)
         self.scheduler.last_epoch = self.start_epoch - 1  # do not move
@@ -374,10 +375,6 @@ class BaseTrainer:
                 self.run_callbacks('on_train_batch_end')
 
             self.lr = {f'lr/pg{ir}': x['lr'] for ir, x in enumerate(self.optimizer.param_groups)}  # for loggers
-
-            with warnings.catch_warnings():
-                warnings.simplefilter('ignore')  # suppress 'Detected lr_scheduler.step() before optimizer.step()'
-                self.scheduler.step()
             self.run_callbacks('on_train_epoch_end')
 
             if RANK in (-1, 0):
@@ -387,9 +384,14 @@ class BaseTrainer:
                 final_epoch = (epoch + 1 == self.epochs) or self.stopper.possible_stop
 
                 if self.args.val or final_epoch:
-                    self.metrics, self.fitness = self.validate()
+                    self.metrics, self.fitness = self.validate()                
                 self.save_metrics(metrics={**self.label_loss_items(self.tloss), **self.metrics, **self.lr})
                 self.stop = self.stopper(epoch + 1, self.metrics, self.fitness)
+
+                with warnings.catch_warnings():
+                    warnings.simplefilter('ignore')  # suppress 'Detected lr_scheduler.step() before optimizer.step()'
+                    val_total_loss = sum([v for k, v in self.metrics.items() if k.startswith('val/') and k.endswith('_loss')])
+                    self.scheduler.step(val_total_loss)
 
                 # Save model
                 if self.args.save or (epoch + 1 == self.epochs):
