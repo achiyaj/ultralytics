@@ -202,7 +202,7 @@ class BaseTrainer:
         os.environ['NCCL_BLOCKING_WAIT'] = '1'  # set to enforce timeout
         dist.init_process_group(
             'nccl' if dist.is_nccl_available() else 'gloo',
-            timeout=timedelta(seconds=900),  # 15 minutes
+            timeout=timedelta(seconds=self.args.get("ddp_command_timeout", 900)),  # 15 minutes
             rank=RANK,
             world_size=world_size)
 
@@ -281,7 +281,7 @@ class BaseTrainer:
         else:
             self.lf = lambda x: (1 - x / self.epochs) * (1.0 - self.args.lrf) + self.args.lrf  # linear
         # self.scheduler = optim.lr_scheduler.LambdaLR(self.optimizer, lr_lambda=self.lf)
-        self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(self.optimizer, patience=(self.args.patience / 2))
+        self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(self.optimizer, patience=2, threshold=self.args.get("val_loss_relative_thresh", 0.015), verbose=True)
         self.stopper, self.stop = EarlyStopping(patience=self.args.patience), False
         self.resume_training(ckpt)
         self.scheduler.last_epoch = self.start_epoch - 1  # do not move
@@ -338,8 +338,10 @@ class BaseTrainer:
                     self.accumulate = max(1, np.interp(ni, xi, [1, self.args.nbs / self.batch_size]).round())
                     for j, x in enumerate(self.optimizer.param_groups):
                         # Bias lr falls from 0.1 to lr0, all other lrs rise from 0.0 to lr0
+                        # x['lr'] = np.interp(
+                        #     ni, xi, [self.args.warmup_bias_lr if j == 0 else 0.0, x['initial_lr'] * self.lf(epoch)])
                         x['lr'] = np.interp(
-                            ni, xi, [self.args.warmup_bias_lr if j == 0 else 0.0, x['initial_lr'] * self.lf(epoch)])
+                            ni, xi, [self.args.warmup_bias_lr if j == 0 else 0.0, self.args.lr0 * self.lf(epoch)])
                         if 'momentum' in x:
                             x['momentum'] = np.interp(ni, xi, [self.args.warmup_momentum, self.args.momentum])
 
