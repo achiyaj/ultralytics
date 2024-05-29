@@ -111,6 +111,7 @@ mosaic: 1.0  # (float) image mosaic (probability)
 mixup: 0.0  # (float) image mixup (probability)
 copy_paste: 0.0  # (float) segment copy-paste (probability)
 val_loss_relative_thresh: 0.001  # thresh for improvement in val loss for LR scheduling and early stopping 
+lr_scheduler_reduction_factor: 0.1  # by how much to reduce the learning rate for every LR scheduler reduction iteration
 
 # Custom config.yaml ---------------------------------------------------------------------------------------------------
 cfg:  # (str, optional) for overriding defaults.yaml

@@ -281,7 +281,7 @@ class BaseTrainer:
         else:
             self.lf = lambda x: (1 - x / self.epochs) * (1.0 - self.args.lrf) + self.args.lrf  # linear
         # self.scheduler = optim.lr_scheduler.LambdaLR(self.optimizer, lr_lambda=self.lf)
-        self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(self.optimizer, patience=2, threshold=self.args.get("val_loss_relative_thresh", 0.015), verbose=True)
+        self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(self.optimizer, patience=2, threshold=self.args.get("val_loss_relative_thresh", 0.015), verbose=True, factor=self.args.get("lr_scheduler_reduction_factor", 0.1))
         self.stopper, self.stop = EarlyStopping(patience=self.args.patience), False
         self.resume_training(ckpt)
         self.scheduler.last_epoch = self.start_epoch - 1  # do not move
